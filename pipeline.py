@@ -16,7 +16,7 @@ import typing
 import numpy as np
 import random
 import matlab
-
+import tensorflow as tf
 
 class Error(Exception): pass
 
@@ -95,6 +95,38 @@ class State(typing.NamedTuple):
     swd_synth: SurfaceWaveDisp
     fit_to_obs: float
 
+
+class SaveableModel(typing.NamedTuple):
+  deps: tf.Variable
+  vs: tf.Variable
+  std_rf: tf.Variable
+  lam_rf: tf.Variable
+  std_swd: tf.Variable
+
+def NewSaveableModel(num_deps):
+    return SaveableModel(
+        deps=tf.Variable(np.zeros([num_deps])),
+        vs=tf.Variable(np.zeros([num_deps])),
+        std_rf=tf.Variable(0.0),
+        lam_rf=tf.Variable(0.0),
+        std_swd=tf.Variable(0.0),
+    )
+
+def AssignSaveableModel(sess, src, dst):
+    vs = np.zeros_like(src.all_deps)
+    dep = src.all_deps[src.idep]
+    layertops = np.concatenate([[0],(dep[1:]+dep[0:-1])/2])
+
+    for k in range(layertops.size):
+        vs[src.all_deps>=layertops[k]] = src.vs[k]
+
+    sess.run(dst.deps.assign(src.all_deps))
+    sess.run(dst.vs.assign(vs))
+    sess.run(dst.std_rf.assign(src.std_rf))
+    sess.run(dst.lam_rf.assign(src.lam_rf))
+    sess.run(dst.std_swd.assign(src.std_swd))
+
+
 def InitialState(rf_obs: RecvFunc, swd_obs: SurfaceWaveDisp, lims: Limits, random_seed: int) -> State:
     model_0 = InitialModel(rf_obs.amp,random_seed)
     if not CheckPrior(model_0, lims):
@@ -165,22 +197,34 @@ def Iterate(rf_obs: RecvFunc, swd_obs: SurfaceWaveDisp, lims: Limits,
 
 def JointInversion(rf_obs: RecvFunc, swd_obs: SurfaceWaveDisp, lims: Limits,
                    max_iter: int, random_seed: int) -> Model:
-
-    # N.B.  The variable random_seed ensures that the process is repeatable.
-    #       Set this in the master code so can start multiple unique chains.
-    #       random_seed must be passed to any subfunction that uses random no.
-
-    # =========================================================================
-    #      Start by calculating for some (arbitrary) initial model
-    # =========================================================================
     state = InitialState(rf_obs, swd_obs, lims, random_seed)
 
-    # =========================================================================
-    #       Iterate by Reverse Jump Markov Chain Monte Carlo
-    # =========================================================================
-    for itr in range(1,max_iter):
-      state, accepted = Iterate(rf_obs, swd_obs, lims, itr, state)
+    saveable_model = NewSaveableModel(state.model.all_deps.size)
 
+    summaries = tf.summary.FileWriter('/tmp/logit')
+    saver = tf.train.Saver()
+
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+
+        accepted_count = 0
+
+        # =========================================================================
+        #       Iterate by Reverse Jump Markov Chain Monte Carlo
+        # =========================================================================
+        for itr in range(1,max_iter):
+            state, accepted = Iterate(rf_obs, swd_obs, lims, itr, state)
+            if accepted: accepted_count += 1
+
+            summary = tf.Summary(value=[
+                tf.Summary.Value(tag="accept_rate", simple_value=accepted_count/itr),
+                tf.Summary.Value(tag="fit_to_obs", simple_value=state.fit_to_obs),
+            ])
+            summaries.add_summary(summary, itr)
+            if itr % 10 == 0:
+              AssignSaveableModel(sess, state.model, saveable_model)
+              saver.save(sess, '/tmp/models', itr)
+    return state.model
 
 # =============================================================================
 #       Setting up the model.

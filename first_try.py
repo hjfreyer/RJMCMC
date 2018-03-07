@@ -8,7 +8,7 @@ Created on Mon Mar  5 14:23:28 2018
 import pipeline
 import numpy as np
 
-import matplotlib.pyplot as plt
+#import matplotlib.pyplot as plt
 import pstats
 import cProfile
 
@@ -17,7 +17,7 @@ pr.enable()
 
 
 #def try_running():
-max_it=500
+max_it=500000
 rnd_sd = 10
 
 
