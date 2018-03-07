@@ -7,10 +7,11 @@ Created on Mon Mar  5 14:23:28 2018
 
 import pipeline
 import numpy as np
+
 import matplotlib.pyplot as plt
 import pstats
 import cProfile
- 
+
 pr = cProfile.Profile()
 pr.enable()
 
@@ -22,7 +23,7 @@ rnd_sd = 10
 
 deps = np.concatenate((np.arange(0,10,0.2), np.arange(10,60,1), np.arange(60,201,5)))
 model = pipeline.Model(vs = np.array([3.4, 4.5]), all_deps = deps,
-                       idep = np.array([60, 80]),  
+                       idep = np.array([60, 80]),
                        std_rf = 0, lam_rf = 0, std_swd = 0)
 
 rf_obs = pipeline.SynthesiseRF(pipeline.MakeFullModel(model))
@@ -36,7 +37,7 @@ out = pipeline.JointInversion(rf_obs, swd_obs, all_lims, max_it, rnd_sd)
 actual_model = pipeline.SaveModel(pipeline.MakeFullModel(model),out[1][:,0])
 
 plt.figure(); plt.title("Suite of Velocity models")
-for k in range(out[1][1,].size-2): 
+for k in range(out[1][1,].size-2):
     colstr = str(0.75-k/2/out[1][1,].size)
     plt.plot(out[1][:,k+1],out[1][:,0],
           '-',linewidth=1,color=colstr)
