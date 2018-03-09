@@ -14,6 +14,7 @@ Created on Mon Feb  5 14:27:30 2018
 #import collections
 import typing
 import numpy as np
+import tensorflow as tf
 import random
 from scipy.interpolate import interp1d
 import matlab
@@ -609,7 +610,7 @@ def _SynthesiseWV(synthmodel) -> BodyWaveform:
     for i in range(1,max_loop):
         freq = i/tot_time
         wavenumber = 2*np.pi*(freq/c) # 2*pi/wavelength
-        J = _CalcPropagatorMatrix(synthmodel,wavenumber,calc_from_layer = 0)
+        J = _CalcPropagatorMatrix(synthmodel,wavenumber)
         D = (J[0][0]-J[1][0])*(J[2][1]-J[3][1])-(J[0][1]-J[1][1])*(J[2][0]-J[3][0])
         # remember when indexing J that Python is zero-indexed!
         transfer_P_horz[i]=2*c/(D*vp)*(J[3][1]-J[2][1])
@@ -652,14 +653,32 @@ def _SynthesiseWV(synthmodel) -> BodyWaveform:
     #return synth waveforms
     return BodyWaveform(P_horz,P_vert,dt)
 
+def _CalcPropagatorMatrix(synthmodel,wavenumber):
 
-def _CalcPropagatorMatrix(synthmodel,wavenumber,calc_from_layer):
-    # We can speed this up (fractionally!) by making sure we only do each
-    # calculation once - hence this looks a bit confusing!
-    vp = synthmodel.vp[calc_from_layer]
-    vs = synthmodel.vs[calc_from_layer]
-    rho = synthmodel.rho[calc_from_layer]
-    c = 1/synthmodel.ray_param # phase velocity
+    with tf.Session() as sess:
+        return _CalcPropagatorMatrixTf(synthmodel.vs.size, wavenumber,
+                              synthmodel.ray_param, synthmodel.vp,
+                              synthmodel.vs, synthmodel.rho,
+                              synthmodel.thickness).eval()
+
+def _CalcPropagatorMatrixTf(layer_count, wavenumber, ray_param,
+                            vps, vses, rhos, thicknesses):
+    intermeds = [_CalcIntermediatePropagatorMatrix(wavenumber, ray_param,
+                                                   vps[i], vses[i], rhos[i],
+                                                   thicknesses[i])
+                 for i in range(layer_count - 1)]
+    final = _CalcFinalPropagatorMatrix(
+        wavenumber, ray_param, vps[-1], vses[-1], rhos[-1])
+
+    res = final
+    for mat in intermeds:
+        res = tf.matmul(res, mat)
+    return res
+
+
+def _CalcIntermediatePropagatorMatrix(wavenumber, ray_param,
+                                      vp, vs, rho, thickness):
+    c = 1 / ray_param
 
     rhoc2 = rho*c*c
     one_rhoc2 = 1/rhoc2
@@ -679,81 +698,93 @@ def _CalcPropagatorMatrix(synthmodel,wavenumber,calc_from_layer):
     gamma2 = gamma*gamma
     gamma12 = gamma1*gamma1
 
-    if calc_from_layer == synthmodel.vs.size - 1:
-        # Calculate propagation through the half space
-        return np.array([[-2*vs_vp*vs_vp, 0, one_rhovp2, 0],
-                         [0, c_vp2*gamma1_etavp, 0, one_rhovp2/eta_vp],
-                         [gamma1_etavs/gamma, 0, -one_rhoc2/gammaetavs, 0],
-                         [0, 1, 0, one_rhoc2/gamma]])
+    P = wavenumber*eta_vp*thickness
+    Q = wavenumber*eta_vs*thickness
 
-#        np.array([[-2*(vs/vp)**2, 0, (rho*vp**2)**-1, 0], # Slightly easier to read
-#                [0,c**2*(gamma-1)*(vp**2*eta_vp)**-1,0,(rho*vp**2*eta_vp)**-1],
-#                [(gamma-1)*(gamma*eta_vs)**-1,0,-(rho*c**2*gamma*eta_vs)**-1,0],
-#                [0,1,0,(rho*c**2*gamma)**-1]])
+    cosP = tf.cos(P)
+    sinP = tf.sin(P)
+    cosQ = tf.cos(Q)
+    sinQ = tf.sin(Q)
+    gammacosP = gamma*cosP
+    gammacosQ = gamma*cosQ
+    sinP_etavp = sinP/eta_vp
+    sinQ_etavs = sinQ/eta_vs
+    sinQetavs = sinQ*eta_vs
+    sinPetavp = sinP*eta_vp
 
-    else:
-        # Calculate propagation through each layer
-        thick = synthmodel.thickness[calc_from_layer]
-        P = wavenumber*eta_vp*thick
-        Q = wavenumber*eta_vs*thick
+    a11 = tf.cast(gammacosP - (gammacosQ - cosQ), tf.complex64)
+    a12 = 1j*tf.cast(gamma1_etavp*sinP + gammaetavs*sinQ, tf.complex64)
+    a13 = tf.cast(-(cosP-cosQ)/rhoc2, tf.complex64)
+    a14 = 1j*tf.cast((sinP_etavp + sinQetavs)/rhoc2, tf.complex64)
+    a21 = -1j*tf.cast(gamma*sinPetavp + gamma1_etavs*sinQ, tf.complex64)
+    a22 = tf.cast(-gammacosP + cosP + gammacosQ, tf.complex64)
+    a23 = 1j*tf.cast((sinPetavp + sinQ_etavs)/rhoc2, tf.complex64)
+    a31 = tf.cast(rhoc2*gamma*(gammacosP-gammacosQ-cosP+cosQ), tf.complex64)
+    a32 = 1j*tf.cast(rhoc2*(sinP_etavp*gamma12 + gamma2*sinQetavs), tf.complex64)
+    a41 = 1j*tf.cast(rhoc2*(gamma2*sinPetavp + gamma12*sinQ_etavs), tf.complex64)
 
-        cosP = np.cos(P)
-        sinP = np.sin(P)
-        cosQ = np.cos(Q)
-        sinQ = np.sin(Q)
-        gammacosP = gamma*cosP
-        gammacosQ = gamma*cosQ
-        sinP_etavp = sinP/eta_vp
-        sinQ_etavs = sinQ/eta_vs
-        sinQetavs = sinQ*eta_vs
-        sinPetavp = sinP*eta_vp
+    return tf.stack([[a11, a12, a13, a14],
+                     [a21, a22, a23, a13],
+                     [a31, a32, a22, a12],
+                     [a41, a31, a21, a11]])
+    #        a_n = np.array([
+    #                [
+    #                    gamma*np.cos(P)-(gamma-1)*np.cos(Q),
+    #                    1j*((gamma-1)*eta_vp**-1*np.sin(P)+gamma*eta_vs*np.sin(Q)),
+    #                    -(rho*c**2)**-1*(np.cos(P)-np.cos(Q)),
+    #                    1j*(rho*c**2)**-1*(eta_vp**-1*np.sin(P)+eta_vs*np.sin(Q)),
+    #                    ],
+    #                [
+    #                    -1j*(gamma*eta_vp*np.sin(P)+(gamma-1)*eta_vs**-1*np.sin(Q)),
+    #                    -(gamma-1)*np.cos(P)+gamma*np.cos(Q),
+    #                    1j*(rho*c**2)**-1*(eta_vp*np.sin(P)+eta_vs**-1*np.sin(Q)),
+    #                    -(rho*c**2)**-1*(np.cos(P)-np.cos(Q)),
+    #                    ],
+    #                [
+    #                    rho*c**2*gamma*(gamma-1)*(np.cos(P)-np.cos(Q)),
+    #                    1j*rho*c**2*((gamma-1)**2*eta_vp**-1*np.sin(P)+gamma**2*eta_vs*np.sin(Q)),
+    #                    -(gamma-1)*np.cos(P)+gamma*np.cos(Q),
+    #                    1j*((gamma-1)*eta_vp**-1*np.sin(P)+gamma*eta_vs*np.sin(Q)),
+    #                    ],
+    #                [
+    #                    1j*rho*c**2*(gamma**2*eta_vp*np.sin(P)+(gamma-1)**2*eta_vs**-1*np.sin(Q)),
+    #                    rho*c**2*gamma*(gamma-1)*(np.cos(P)-np.cos(Q)),
+    #                    -1j*(gamma*eta_vp*np.sin(P)+(gamma-1)*eta_vs**-1*np.sin(Q)),
+    #                    gamma*np.cos(P)-(gamma-1)*np.cos(Q),
+    #                    ],
+    #                ])
 
-        a11 = gammacosP - (gammacosQ - cosQ)
-        a12 = 1j*(gamma1_etavp*sinP + gammaetavs*sinQ)
-        a13 = -(cosP-cosQ)/rhoc2
-        a14 = 1j*((sinP_etavp + sinQetavs)/rhoc2)
-        a21 = -1j*(gamma*sinPetavp + gamma1_etavs*sinQ)
-        a22 = -gammacosP + cosP + gammacosQ
-        a23 = 1j*((sinPetavp + sinQ_etavs)/rhoc2)
-        a31 = rhoc2*gamma*(gammacosP-gammacosQ-cosP+cosQ)
-        a32 = 1j*rhoc2*(sinP_etavp*gamma12 + gamma2*sinQetavs)
-        a41 = 1j*rhoc2*(gamma2*sinPetavp + gamma12*sinQ_etavs)
+def _CalcFinalPropagatorMatrix(wavenumber, ray_param, vp, vs, rho):
+    c = 1 / ray_param
 
-        a_n = np.array([[a11, a12, a13, a14],
-                        [a21, a22, a23, a13],
-                        [a31, a32, a22, a12],
-                        [a41, a31, a21, a11]])
+    rhoc2 = rho*c*c
+    one_rhoc2 = 1/rhoc2
+    rhovp2 = rho*vp*vp
+    one_rhovp2 = 1/rhovp2
+    vs_vp = vs/vp
+    c_vp2 = c/vp*c/vp
 
-#        a_n = np.array([
-#                [
-#                    gamma*np.cos(P)-(gamma-1)*np.cos(Q),
-#                    1j*((gamma-1)*eta_vp**-1*np.sin(P)+gamma*eta_vs*np.sin(Q)),
-#                    -(rho*c**2)**-1*(np.cos(P)-np.cos(Q)),
-#                    1j*(rho*c**2)**-1*(eta_vp**-1*np.sin(P)+eta_vs*np.sin(Q)),
-#                    ],
-#                [
-#                    -1j*(gamma*eta_vp*np.sin(P)+(gamma-1)*eta_vs**-1*np.sin(Q)),
-#                    -(gamma-1)*np.cos(P)+gamma*np.cos(Q),
-#                    1j*(rho*c**2)**-1*(eta_vp*np.sin(P)+eta_vs**-1*np.sin(Q)),
-#                    -(rho*c**2)**-1*(np.cos(P)-np.cos(Q)),
-#                    ],
-#                [
-#                    rho*c**2*gamma*(gamma-1)*(np.cos(P)-np.cos(Q)),
-#                    1j*rho*c**2*((gamma-1)**2*eta_vp**-1*np.sin(P)+gamma**2*eta_vs*np.sin(Q)),
-#                    -(gamma-1)*np.cos(P)+gamma*np.cos(Q),
-#                    1j*((gamma-1)*eta_vp**-1*np.sin(P)+gamma*eta_vs*np.sin(Q)),
-#                    ],
-#                [
-#                    1j*rho*c**2*(gamma**2*eta_vp*np.sin(P)+(gamma-1)**2*eta_vs**-1*np.sin(Q)),
-#                    rho*c**2*gamma*(gamma-1)*(np.cos(P)-np.cos(Q)),
-#                    -1j*(gamma*eta_vp*np.sin(P)+(gamma-1)*eta_vs**-1*np.sin(Q)),
-#                    gamma*np.cos(P)-(gamma-1)*np.cos(Q),
-#                    ],
-#                ])
-        out= np.matmul(
-                _CalcPropagatorMatrix(synthmodel,wavenumber,calc_from_layer+1),
-                a_n)
-        return out
+    gamma = 2*vs/c*vs/c
+    eta_vp = np.sqrt(c_vp2-1)
+    eta_vs = np.sqrt(c/vs*c/vs-1)
+
+    gamma1 = gamma-1
+    gamma1_etavp = gamma1/eta_vp
+    gamma1_etavs = gamma1/eta_vs
+    gammaetavs = gamma*eta_vs
+    gamma2 = gamma*gamma
+    gamma12 = gamma1*gamma1
+
+    # Calculate propagation through the half space
+    return tf.cast(tf.stack([[-2*vs_vp*vs_vp, 0, one_rhovp2, 0],
+                     [0, c_vp2*gamma1_etavp, 0, one_rhovp2/eta_vp],
+                     [gamma1_etavs/gamma, 0, -one_rhoc2/gammaetavs, 0],
+                             [0, 1, 0, one_rhoc2/gamma]]), tf.complex64)
+    # Slightly easier to read
+    #                [0,c**2*(gamma-1)*(vp**2*eta_vp)**-1,0,(rho*vp**2*eta_vp)**-1],
+    #                [(gamma-1)*(gamma*eta_vs)**-1,0,-(rho*c**2*gamma*eta_vs)**-1,0],
+    #                [0,1,0,(rho*c**2*gamma)**-1]])
+
 
 # This is a free surface transform, used to rotate from RTZ to P-SV-SH
 # while surpressing the effects of the free surface
