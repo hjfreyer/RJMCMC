@@ -12,6 +12,7 @@ Created on Mon Feb  5 14:27:30 2018
 
 
 #import collections
+import functools
 import typing
 import numpy as np
 import tensorflow as tf
@@ -653,16 +654,27 @@ def _SynthesiseWV(synthmodel) -> BodyWaveform:
     #return synth waveforms
     return BodyWaveform(P_horz,P_vert,dt)
 
-def _CalcPropagatorMatrix(synthmodel,wavenumber):
+class PropagatorMatrixGraph(typing.NamedTuple):
+    wavenumber: tf.Tensor
+    ray_param: tf.Tensor
+    vps: tf.Tensor
+    vses: tf.Tensor
+    rhos: tf.Tensor
+    thicknesses: tf.Tensor
 
-    with tf.Session() as sess:
-        return _CalcPropagatorMatrixTf(synthmodel.vs.size, wavenumber,
-                              synthmodel.ray_param, synthmodel.vp,
-                              synthmodel.vs, synthmodel.rho,
-                              synthmodel.thickness).eval()
+    result: tf.Tensor
 
-def _CalcPropagatorMatrixTf(layer_count, wavenumber, ray_param,
-                            vps, vses, rhos, thicknesses):
+@functools.lru_cache(maxsize=None)
+def _GetPropagatorMatrixGraph(layer_count):
+    print('Make layer for ', layer_count)
+
+    wavenumber = tf.placeholder(tf.float32)
+    ray_param = tf.placeholder(tf.float32)
+    vps = tf.placeholder(tf.float32)
+    vses = tf.placeholder(tf.float32)
+    rhos = tf.placeholder(tf.float32)
+    thicknesses = tf.placeholder(tf.float32)
+
     intermeds = [_CalcIntermediatePropagatorMatrix(wavenumber, ray_param,
                                                    vps[i], vses[i], rhos[i],
                                                    thicknesses[i])
@@ -673,8 +685,24 @@ def _CalcPropagatorMatrixTf(layer_count, wavenumber, ray_param,
     res = final
     for mat in intermeds:
         res = tf.matmul(res, mat)
-    return res
 
+    return PropagatorMatrixGraph(wavenumber=wavenumber, ray_param=ray_param,
+                                 vps=vps, vses=vses, rhos=rhos,
+                                 thicknesses=thicknesses, result=res)
+
+
+def _CalcPropagatorMatrix(synthmodel,wavenumber):
+    g = _GetPropagatorMatrixGraph(synthmodel.vs.size)
+    d = {
+        g.wavenumber: wavenumber,
+        g.ray_param: synthmodel.ray_param,
+        g.vps: synthmodel.vp,
+        g.vses: synthmodel.vs,
+        g.rhos: synthmodel.rho,
+        g.thicknesses: synthmodel.thickness,
+    }
+
+    return g.result.eval(feed_dict=d)
 
 def _CalcIntermediatePropagatorMatrix(wavenumber, ray_param,
                                       vp, vs, rho, thickness):
@@ -688,8 +716,8 @@ def _CalcIntermediatePropagatorMatrix(wavenumber, ray_param,
     c_vp2 = c/vp*c/vp
 
     gamma = 2*vs/c*vs/c
-    eta_vp = np.sqrt(c_vp2-1)
-    eta_vs = np.sqrt(c/vs*c/vs-1)
+    eta_vp = tf.sqrt(c_vp2-1)
+    eta_vs = tf.sqrt(c/vs*c/vs-1)
 
     gamma1 = gamma-1
     gamma1_etavp = gamma1/eta_vp
@@ -765,8 +793,8 @@ def _CalcFinalPropagatorMatrix(wavenumber, ray_param, vp, vs, rho):
     c_vp2 = c/vp*c/vp
 
     gamma = 2*vs/c*vs/c
-    eta_vp = np.sqrt(c_vp2-1)
-    eta_vs = np.sqrt(c/vs*c/vs-1)
+    eta_vp = tf.sqrt(c_vp2-1)
+    eta_vs = tf.sqrt(c/vs*c/vs-1)
 
     gamma1 = gamma-1
     gamma1_etavp = gamma1/eta_vp

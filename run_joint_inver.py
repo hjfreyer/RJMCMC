@@ -12,12 +12,14 @@ import pstats
 import cProfile
 import shutil
 
+import tensorflow as tf
+
 pr = cProfile.Profile()
 pr.enable()
 
 
 #def try_running():
-max_it=200000
+max_it=500
 rnd_sd = 10
 
 save_name = 'MBEY_Psz'
@@ -41,8 +43,9 @@ outdir = outdir_fn()
 
 os.mkdir(outdir)
 shutil.copyfile('input_data.py', os.path.join(outdir, 'input_data.py'))
-out = pipeline.JointInversion(rf_obs, swd_obs, all_lims, max_it, rnd_sd,
-                              os.path.join(outdir, save_name), 'Ps')
+with tf.Session():
+    out = pipeline.JointInversion(rf_obs, swd_obs, all_lims, max_it, rnd_sd,
+                                  os.path.join(outdir, save_name), 'Ps')
 
 pr.disable()
 s=open(os.path.join(outdir, 'profiletimes.txt'), 'w')
