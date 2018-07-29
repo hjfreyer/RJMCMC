@@ -5,7 +5,7 @@ Created on Fri Mar  9 07:31:01 2018
 @author: emily
 """
 
-import pipeline
+from rjmcmc import pipeline
 import numpy as np
 
 

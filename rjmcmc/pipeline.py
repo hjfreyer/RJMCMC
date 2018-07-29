@@ -11,96 +11,56 @@ Created on Mon Feb  5 14:27:30 2018
 # GA:       Geoff Abers' code given to me by Helen Janizewski
 
 
-#import collections
+import collections
 import functools
 import typing
 import numpy as np
 import tensorflow as tf
 import random
 from scipy.interpolate import interp1d
-import matlab
+from rjmcmc import matlab
 
 
 # =============================================================================
 # Set up classes for commonly used variables
 # =============================================================================
+RecvFunc = collections.namedtuple('RecvFunc',
+                                  'amp dt ray_param std_sc')
 
-class RecvFunc(typing.NamedTuple):
-    amp: np.array  # assumed to be processed in same way as synthetics are here
-    dt: float      # constant timestep in s
-    ray_param: float  # tested assuming ray_param = 0.0618
-    std_sc: float # This is trying to account for near-surface misrotation
-                    # scale std_rf by std_sc for the first 0.5s of the signal
-                    # i.e. set to 1 to not bodge things!
 # Receiver function assumed to start at t=0s with a constant timestep, dt
 # required to be stretched to constant RP (equivalent to distance of 60 degrees)
 
-class BodyWaveform(typing.NamedTuple):
-    amp_R: np.array # horizontal (radial) energy
-    amp_Z: np.array # vertical energy
-    dt: float
+BodyWaveform = collections.namedtuple('BodyWaveform', 'amp_R amp_Z dt')
+RotBodyWaveform = collections.namedtuple('RotBodyWaveform',
+                                         'parent daughter dt')
 
-class RotBodyWaveform(typing.NamedTuple):
-    parent: np.array # P energy for Ps, SV energy for Sp
-    daughter: np.array # SV energy for Ps, P energy for Sp
-    dt: float
+SurfaceWaveDisp = collections.namedtuple('SurfaceWaveDisp',
+                                         'period c')
 
-class SurfaceWaveDisp(typing.NamedTuple):
-    period: np.array    # dominant period of dispersion measurement, seconds
-    c: np.array  # phase velocity in km/s
-# Surface wave dispersion measurements are allowed at any series of periods (s)
-
-class Model(typing.NamedTuple):
-    vs: np.array
-    all_deps: np.array    # all possible depth nodes
-    idep: np.array        # indices of used depth nodes
-    std_rf: float
-    lam_rf: float
-    std_swd: float
+Model = collections.namedtuple('Model',
+    'vs all_deps idep std_rf lam_rf std_swd')
 # Inputs: dep=[list of depths, km]; vs=[list of Vs, km/s];
 # std_rf=RF standard deviation; lam_rf=RF lambda; std_swd=SWD dispersion std
 # Note that std_rf, lam_rf, std_swd are all inputs to the covariance matrix,
 # i.e. allow greater wiggle room in the misfit - [B&c12]
 # I'm also including a parameter all_deps which defines the depth grid
 
-class Limits(typing.NamedTuple):
-    vs: tuple
-    dep: tuple
-    std_rf: tuple
-    lam_rf: tuple
-    std_swd: tuple
+Limits = collections.namedtuple('Limits',
+    'vs    dep    std_rf    lam_rf    std_swd')
 # Reasonable min and max values for all model parameters define the prior
 # distribution - i.e. uniform probability within some reasonable range of values
 
-class CovarianceMatrix(typing.NamedTuple):
-    Covar: np.array
-    invCovar: np.array
-    detCovar: float
-    R: np.array
+CovarianceMatrix = collections.namedtuple('CovarianceMatrix',
+    'Covar    invCovar    detCovar    R')
 
-class ModelChange(typing.NamedTuple):
-    theta: float
-    old_param: float
-    new_param: float
-    which_change: str
+ModelChange = collections.namedtuple('ModelChange',
+    'theta    old_param    new_param    which_change')
 
-class SynthModel(typing.NamedTuple):
-    vs: np.array
-    vp: np.array
-    rho: np.array
-    thickness: np.array
-    layertops: np.array
-    avdep: np.array
-    ray_param: float
-    rf_phase: str
+SynthModel = collections.namedtuple('SynthModel',
+    'vs    vp    rho    thickness    layertops    avdep    ray_param    rf_phase')
 
-class GlobalState(typing.NamedTuple):
-    model: Model
-    fullmodel: SynthModel
-    cov: CovarianceMatrix
-    rf_synth: RecvFunc
-    swd_synth: SurfaceWaveDisp
-    fit_to_obs: float
+GlobalState = collections.namedtuple('GlobalState',
+    'model fullmodel    cov    rf_synth    swd_synth    fit_to_obs')
 
 class Error(Exception): pass
 
@@ -144,7 +104,7 @@ def JointInversion(rf_obs: RecvFunc, swd_obs: SurfaceWaveDisp, lims: Limits,
     # =========================================================================
     for itr in range(1,max_iter):
         if not itr % 20:
-            print("Iteration {}..".format(itr))
+            tf.logging.info('Iteration %d', itr)
 
         state, keep_yn, all_alpha[n_mwin] = NextState(
             itr, rf_obs, swd_obs, lims, rf_phase, state)
@@ -586,6 +546,39 @@ def SynthesiseRF(fullmodel, rf_in) -> RecvFunc:
 
 
 def _SynthesiseWV(synthmodel) -> BodyWaveform:
+    g = _GetSynthesiseWVGraph(synthmodel.vs.size)
+    d = {
+        g.ray_param: synthmodel.ray_param,
+        g.vps: synthmodel.vp,
+        g.vses: synthmodel.vs,
+        g.rhos: synthmodel.rho,
+        g.thicknesses: synthmodel.thickness,
+    }
+    P_horz, P_vert = tf.get_default_session().run([g.res_P_horz, g.res_P_vert],
+                                                  feed_dict=d)
+    return BodyWaveform(P_horz, P_vert, g.ret_dt)
+
+SynthesiseWVGraph = collections.namedtuple('SynthesiseWVGraph',
+    'ray_param vps vses rhos thicknesses res_P_horz res_P_vert ret_dt')
+@functools.lru_cache(maxsize=None)
+def _GetSynthesiseWVGraph(layer_count):
+    print('Make layer for ', layer_count)
+
+    ray_param = tf.placeholder(tf.float32)
+    vps = tf.placeholder(tf.float32)
+    vses = tf.placeholder(tf.float32)
+    rhos = tf.placeholder(tf.float32)
+    thicknesses = tf.placeholder(tf.float32)
+
+    res = _TfSynthesiseWVGraph(layer_count, ray_param, vps, vses, rhos,
+                               thicknesses)
+
+    return SynthesiseWVGraph(ray_param, vps, vses, rhos, thicknesses,
+                             res_P_horz=res.amp_R,
+                             res_P_vert=res.amp_Z,
+                             ret_dt=res.dt)
+
+def _TfSynthesiseWVGraph(layer_count, ray_param, vps, vses, rhos, thicknesses):
     # And the filter band
     T=[1,100] # corner periods of filter, sec
 
@@ -598,52 +591,68 @@ def _SynthesiseWV(synthmodel) -> BodyWaveform:
                     # the synthetics.  Should be n_fft/2+1, but given that we
                     # are filtering the synthetics, calculating all those really
                     # high frequencies is just a waste of time
-    tot_time = dt*n_fft # 102.4 seconds, for 50s at dt=0.05
-    dom_freq = (1/tot_time)*(np.arange(1,max_loop))
-    transfer_P_horz = np.zeros(n_fft, dtype = np.complex_)
-    transfer_P_vert = np.zeros(n_fft, dtype = np.complex_)
+    tot_time = dt * n_fft # 102.4 seconds, for 50s at dt=0.05
+    dom_freq = tf.range(max_loop, dtype=tf.float32) / tot_time
     # transfer_S_horz = np.zeros(n_fft)
     # transfer_S_vert = np.zeros(n_fft)
-    c=1/synthmodel.ray_param
-    vp = synthmodel.vp[-1] # Vp in halfspace
+    c = 1 / ray_param
+    vp = vps[-1] # Vp in halfspace
     # vs = synthmodel.vs[-1] # Vs in halfspace
 
-    for i in range(1,max_loop):
-        freq = i/tot_time
-        wavenumber = 2*np.pi*(freq/c) # 2*pi/wavelength
-        J = _CalcPropagatorMatrix(synthmodel,wavenumber)
+    transfer_P_horz_build = [0]  # Zero frequency term
+    transfer_P_vert_build = [0]
+
+    for i in range(1, max_loop):
+        wavenumber = 2 * np.pi * (dom_freq[i] / c) # 2*pi/wavelength
+        J = _CalcPropagatorMatrix(layer_count, wavenumber, ray_param, vps, vses,
+                                  rhos, thicknesses)
         D = (J[0][0]-J[1][0])*(J[2][1]-J[3][1])-(J[0][1]-J[1][1])*(J[2][0]-J[3][0])
+
+        c_comp = tf.cast(c, tf.complex64)
+        vp_comp = tf.cast(vp, tf.complex64)
+
         # remember when indexing J that Python is zero-indexed!
-        transfer_P_horz[i]=2*c/(D*vp)*(J[3][1]-J[2][1])
-        transfer_P_vert[i]=2*c/(D*vp)*(J[3][0]-J[2][0])
+        transfer_P_horz_build.append(2*c_comp/(D*vp_comp)*(J[3][1]-J[2][1]))
+        transfer_P_vert_build.append(2*c_comp/(D*vp_comp)*(J[3][0]-J[2][0]))
         # transfer_S_horz[i]=-c/(D*vs)*(J[0][1]-J[1][1])
         # transfer_S_vert[i]=-c/(D*vs)*(J[0][0]-J[1][0])
 
+    transfer_P_horz = tf.stack(transfer_P_horz_build)
+    transfer_P_vert = tf.stack(transfer_P_vert_build)
+
     # apply a Gaussian filter
-    transfer_P_horz[1:max_loop] *= np.exp(-dom_freq**2*T[0]/2)
-    transfer_P_vert[1:max_loop] *= np.exp(-dom_freq**2*T[0]/2)
+    filter = tf.cast(tf.exp(-(dom_freq ** 2) * T[0] / 2), tf.complex64)
+    transfer_P_horz *= filter
+    transfer_P_vert *= filter
     # transfer_S_horz[1:max_loop] *= np.exp(-dom_freq**2*T[0]/2)
     # transfer_S_vert[1:max_loop] *= np.exp(-dom_freq**2*T[0]/2)
 
-    # Make symmetric for IFFT
-    transfer_P_horz[-2:-max_loop:-1] = transfer_P_horz[1:max_loop-1]
-    transfer_P_vert[-2:-max_loop:-1] = transfer_P_vert[1:max_loop-1]
+    # Build input for IFFT. Starts with transfer_P_*, followed by a bunch of
+    # zeros, followed by transfer_P_* reversed. Use enough zeros to make the
+    # whole thing n_fft long.
+    zeros = tf.zeros(n_fft - 2 * max_loop, dtype=tf.complex64)
+
+    transfer_P_horz = tf.concat([transfer_P_horz, zeros,
+                                 tf.reverse(transfer_P_horz, [0])], 0)
+    transfer_P_vert = tf.concat([transfer_P_vert, zeros,
+                                 tf.reverse(transfer_P_vert, [0])], 0)
+
     # transfer_S_horz[-2:-max_loop:-1] = transfer_S_horz[1:max_loop]
     # transfer_S_vert[-2:-max_loop:-1] = transfer_S_vert[1:max_loop]
 
-    P_horz = np.real(np.fft.ifft(transfer_P_horz))/dt
-    P_vert = np.real(np.fft.ifft(transfer_P_vert))/dt
+    P_horz = tf.real(tf.ifft(transfer_P_horz))/dt
+    P_vert = tf.real(tf.ifft(transfer_P_vert))/dt
     # S_horz = np.real(np.fft.ifft(transfer_S_horz))/dt
     # S_vert = np.real(np.fft.ifft(transfer_S_vert))/dt
 
     # Filter and cut to size
-    P_horz = matlab.BpFilt(P_horz,T[0],T[1],dt)[:round(tmax/dt)]
-    P_vert = matlab.BpFilt(P_vert,T[0],T[1],dt)[:round(tmax/dt)]
+    P_horz = matlab.TfBpFilt(P_horz,T[0],T[1],dt)[:round(tmax/dt)]
+    P_vert = matlab.TfBpFilt(P_vert,T[0],T[1],dt)[:round(tmax/dt)]
     # S_horz = matlab.BpFilt(S_horz,T[0],T[1],dt)[:round(tmax/dt)]
     # S_vert = matlab.BpFilt(S_vert,T[0],T[1],dt)[:round(tmax/dt)]
 
     # Normalise
-    P_max = np.max(np.concatenate([P_horz, P_vert]))
+    P_max = tf.reduce_max(tf.concat([P_horz, P_vert], 0))
     P_horz = P_horz/P_max
     P_vert = P_vert/P_max
     # S_max = np.max(np.concatenate([S_horz, S_vert]))
@@ -654,27 +663,8 @@ def _SynthesiseWV(synthmodel) -> BodyWaveform:
     #return synth waveforms
     return BodyWaveform(P_horz,P_vert,dt)
 
-class PropagatorMatrixGraph(typing.NamedTuple):
-    wavenumber: tf.Tensor
-    ray_param: tf.Tensor
-    vps: tf.Tensor
-    vses: tf.Tensor
-    rhos: tf.Tensor
-    thicknesses: tf.Tensor
-
-    result: tf.Tensor
-
-@functools.lru_cache(maxsize=None)
-def _GetPropagatorMatrixGraph(layer_count):
-    print('Make layer for ', layer_count)
-
-    wavenumber = tf.placeholder(tf.float32)
-    ray_param = tf.placeholder(tf.float32)
-    vps = tf.placeholder(tf.float32)
-    vses = tf.placeholder(tf.float32)
-    rhos = tf.placeholder(tf.float32)
-    thicknesses = tf.placeholder(tf.float32)
-
+def _CalcPropagatorMatrix(layer_count, wavenumber, ray_param, vps, vses, rhos,
+                          thicknesses):
     intermeds = [_CalcIntermediatePropagatorMatrix(wavenumber, ray_param,
                                                    vps[i], vses[i], rhos[i],
                                                    thicknesses[i])
@@ -686,23 +676,8 @@ def _GetPropagatorMatrixGraph(layer_count):
     for mat in intermeds:
         res = tf.matmul(res, mat)
 
-    return PropagatorMatrixGraph(wavenumber=wavenumber, ray_param=ray_param,
-                                 vps=vps, vses=vses, rhos=rhos,
-                                 thicknesses=thicknesses, result=res)
+    return res
 
-
-def _CalcPropagatorMatrix(synthmodel,wavenumber):
-    g = _GetPropagatorMatrixGraph(synthmodel.vs.size)
-    d = {
-        g.wavenumber: wavenumber,
-        g.ray_param: synthmodel.ray_param,
-        g.vps: synthmodel.vp,
-        g.vses: synthmodel.vs,
-        g.rhos: synthmodel.rho,
-        g.thicknesses: synthmodel.thickness,
-    }
-
-    return g.result.eval(feed_dict=d)
 
 def _CalcIntermediatePropagatorMatrix(wavenumber, ray_param,
                                       vp, vs, rho, thickness):

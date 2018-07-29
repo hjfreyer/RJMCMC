@@ -5,21 +5,24 @@ Created on Mon Mar  5 14:23:28 2018
 @author: emily
 """
 
-import pipeline
+from rjmcmc import pipeline
 import os
-import input_data
+from rjmcmc import input_data
 import pstats
 import cProfile
 import shutil
 
 import tensorflow as tf
 
+tf.logging.set_verbosity('INFO')
+tf_config = os.environ.get('TF_CONFIG')
+print(tf_config)
 #pr = cProfile.Profile()
 #pr.enable()
 
 
 #def try_running():
-max_it=500
+max_it=5000
 rnd_sd = 10
 
 save_name = 'MBEY_Psz'
@@ -41,11 +44,13 @@ while os.path.exists(outdir_fn()):
 
 outdir = outdir_fn()
 
-os.mkdir(outdir)
-shutil.copyfile('input_data.py', os.path.join(outdir, 'input_data.py'))
-with tf.Session():
+#os.mkdir(outdir)
+#shutil.copyfile('input_data.py', os.path.join(outdir, 'input_data.py'))
+with tf.Session(config=tf.ConfigProto(log_device_placement=True)):
     out = pipeline.JointInversion(rf_obs, swd_obs, all_lims, max_it, rnd_sd,
-                                  os.path.join(outdir, save_name), 'Ps')
+                                  os.path.join('/tmp', save_name), 'Ps')
+
+#
 
 #pr.disable()
 #s=open(os.path.join(outdir, 'profiletimes.txt'), 'w')

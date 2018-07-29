@@ -12,13 +12,15 @@ from scipy import signal
 import numpy as np
 from scipy.signal import butter, detrend
 from scipy.optimize import brent
-from spectrum.mtm import dpss 
+from spectrum.mtm import dpss
 # install as conda config --add channels conda-forge; conda install spectrum
 
+import tensorflow as tf
+
 def findmin(func, args, brack):
-    return brent(func, args, brack, tol=1e-3, 
+    return brent(func, args, brack, tol=1e-3,
                    full_output = True, maxiter=500)[0:2]
-    
+
 def slepian(n_samp, num_tapers):
     return dpss(N = n_samp, NW=int((num_tapers+1)/2), k=None)[0]
 
@@ -33,14 +35,14 @@ def mldivide(a, b):
 #    else:
 #        from itertools import combinations
 #        for nz in combinations(range(num_vars), rank):    # the variables not set to zero
-#            try: 
-#                sol = np.zeros((num_vars, 1))  
+#            try:
+#                sol = np.zeros((num_vars, 1))
 #                sol[nz, :] = np.asarray(np.linalg.solve(A[:, nz], b))
-#            except np.linalg.LinAlgError:     
+#            except np.linalg.LinAlgError:
 #                pass
-    
-    
-# Butterworth bandpass filter edited slightly from 
+
+
+# Butterworth bandpass filter edited slightly from
 #   http://scipy.github.io/old-wiki/pages/Cookbook/ButterworthBandpass
 
 def ButterBandpass(short_T, long_T, dt, order=2):
@@ -53,19 +55,25 @@ def ButterBandpass(short_T, long_T, dt, order=2):
 def BpFilt(data, short_T, long_T, dt, order=2):
      b, a = ButterBandpass(short_T, long_T, dt, order=order)
      data = data - np.mean(data)
-     y = filtfilt(b, a, data) # Note: filtfilt rather than lfilt applies a 
+     y = filtfilt(b, a, data) # Note: filtfilt rather than lfilt applies a
                                # forward and backward filter, so no phase shift
      y = detrend(y)
      return y
- 
+
+def TfBpFilt(data, short_T, long_T, dt, order=2):
+    return tf.cast(tf.py_func(_TfWrapBpFilt, [data, short_T, long_T, dt, order], Tout=tf.float64),
+                   tf.float32)
+
+def _TfWrapBpFilt(data, short_T, long_T, dt, order):
+    return BpFilt(data, short_T, long_T, dt, order)
+
 def Taper(data, i_taper_width, i_taper_start, i_taper_end):
     # This will apply a (modified) Hann window to data (a np.array), such that
-    # there is a cosine taper (i_taper_width points long) that is equal to 1 
+    # there is a cosine taper (i_taper_width points long) that is equal to 1
     # between i_taper_start (index) and i_taper_end (index)
     taper = np.concatenate([np.zeros(i_taper_start - i_taper_width),
                             np.insert(np.hanning(2*i_taper_width),i_taper_width,
                                       np.ones(i_taper_end - i_taper_start)),
                             np.zeros(data.size - i_taper_end - i_taper_width)])
-    
+
     return data * taper
-    
